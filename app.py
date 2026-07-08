@@ -9,7 +9,7 @@ from dateutil.relativedelta import relativedelta
 
 
 # ============================================================
-# ETF 자산배분 앱
+# 강환국 전략 ETF 자산배분 앱
 # - VAA 공격형 / LAA / 오리지널 듀얼 모멘텀
 # - 국내상장 ETF 대체 매핑
 # - 화면에서 KRX 키를 입력받지 않음
@@ -17,7 +17,7 @@ from dateutil.relativedelta import relativedelta
 # - Appendix: 매수 전략 및 리밸런싱 계산 방식 표 제공
 # ============================================================
 
-st.set_page_config(page_title="ETF 자산배분", layout="wide")
+st.set_page_config(page_title="강환국 전략 ETF 자산배분", layout="wide")
 
 KRX_URL = "http://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd"
 
@@ -327,6 +327,7 @@ def alloc_rows(
     original_map: dict,
     rebalance_info_by_original: dict,
     base_date,
+    total_investment: float,
 ):
     rows = []
 
@@ -337,6 +338,9 @@ def alloc_rows(
         last_date = rb.get("last_date", None)
         next_date = next_rebalance_date(last_date, cycle) if last_date else None
 
+        total_weight = strategy_weight * inner_weight
+        target_amount = total_investment * total_weight
+
         rows.append(
             {
                 "하위전략": strategy,
@@ -345,7 +349,8 @@ def alloc_rows(
                 "국내 ETF명": info["name"],
                 "자산군": info["asset"],
                 "하위전략 내 비중": inner_weight,
-                "강환국 전략 전체 비중": strategy_weight * inner_weight,
+                "강환국 전략 전체 비중": total_weight,
+                "목표 투자금": target_amount,
                 "리밸런싱 주기": cycle,
                 "최근 리밸런싱일": last_date,
                 "다음 리밸런싱일": next_date,
@@ -363,12 +368,29 @@ def pct(x):
     return f"{x * 100:.2f}%"
 
 
+def money_krw(x):
+    if x is None or pd.isna(x):
+        return "-"
+
+    return f"{float(x):,.0f}원"
+
+
 def pct_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     out = df.copy()
 
     for c in cols:
         if c in out.columns:
             out[c] = out[c].map(pct)
+
+    return out
+
+
+def money_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    out = df.copy()
+
+    for c in cols:
+        if c in out.columns:
+            out[c] = out[c].map(money_krw)
 
     return out
 
@@ -469,8 +491,8 @@ def appendix_rebalance_table() -> pd.DataFrame:
 # 화면
 # ============================================================
 
-st.title("ETF 자산배분")
-st.caption("VAA 공격형 · LAA · 오리지널 듀얼 모멘텀을 국내상장 ETF로 대체해 최종 매수 비중과 리밸런싱 일정을 계산합니다.")
+st.title("강환국 전략 ETF 자산배분")
+st.caption("VAA 공격형 · LAA · 오리지널 듀얼 모멘텀을 국내상장 ETF로 대체해 최종 매수 비중, 목표 투자금, 리밸런싱 일정을 계산합니다.")
 
 data_key = get_data_key()
 
@@ -487,6 +509,14 @@ with st.sidebar:
         max_value=36,
         value=15,
         help="12개월 수익률 계산을 위해 최소 13개월 이상 필요합니다.",
+    )
+    total_investment = st.number_input(
+        "총 투자금",
+        min_value=0,
+        value=10_000_000,
+        step=1,
+        format="%d",
+        help="원 단위까지 입력할 수 있습니다. 최종 매수 비중에 따라 ETF별 목표 투자금이 계산됩니다.",
     )
 
     st.header("2) LAA 수동 조건")
@@ -642,6 +672,8 @@ with st.expander("Appendix. 매수 전략 및 리밸런싱 일정 계산 방식"
     with tab2:
         st.dataframe(appendix_rebalance_table(), use_container_width=True)
 
+st.metric("현재 총 투자금", money_krw(total_investment))
+
 run = st.button("전략 비중 계산", type="primary")
 
 if run:
@@ -703,6 +735,7 @@ if run:
         original_map,
         laa_rebalance_info,
         eval_date,
+        total_investment,
     )
 
     vt = vaa_table(hist, original_map, actual_eval_dt)
@@ -744,6 +777,7 @@ if run:
         original_map,
         {vaa_selected: {"cycle": "월 1회", "last_date": vaa_monthly_last}},
         eval_date,
+        total_investment,
     )
 
     ot = odm_table(hist, original_map, actual_eval_dt)
@@ -778,6 +812,7 @@ if run:
         original_map,
         {odm_selected: {"cycle": "월 1회", "last_date": odm_monthly_last}},
         eval_date,
+        total_investment,
     )
 
     st.subheader("하위전략별 선택 결과")
@@ -833,6 +868,7 @@ if run:
             "강환국 전략 전체 비중",
         ],
     )
+    detail_display = money_cols(detail_display, ["목표 투자금"])
     detail_display = date_cols_to_string(detail_display, ["최근 리밸런싱일", "다음 리밸런싱일"])
     st.dataframe(detail_display, use_container_width=True)
 
@@ -842,6 +878,7 @@ if run:
         .agg(
             {
                 "강환국 전략 전체 비중": "sum",
+                "목표 투자금": "sum",
                 "다음 리밸런싱일": lambda x: min(v for v in x if v is not None),
                 "리밸런싱 상태": lambda x: "리밸런싱 필요" if "리밸런싱 필요" in list(x) else "대기",
             }
@@ -851,6 +888,7 @@ if run:
 
     st.subheader("최종 매수 비중")
     final_display = pct_cols(final, ["강환국 전략 전체 비중"])
+    final_display = money_cols(final_display, ["목표 투자금"])
     final_display = date_cols_to_string(final_display, ["다음 리밸런싱일"])
     st.dataframe(final_display, use_container_width=True)
 
@@ -868,7 +906,7 @@ if run:
     )
 
 else:
-    st.info("조회 기준, LAA 조건, 최근 리밸런싱일을 선택한 뒤 '전략 비중 계산'을 누르세요.")
+    st.info("총 투자금, 조회 기준, LAA 조건, 최근 리밸런싱일을 선택한 뒤 '전략 비중 계산'을 누르세요.")
 
     st.subheader("기본 국내 ETF 매핑")
     st.dataframe(
