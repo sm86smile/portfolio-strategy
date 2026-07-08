@@ -8,6 +8,14 @@ import streamlit as st
 from dateutil.relativedelta import relativedelta
 
 
+# ============================================================
+# 강환국 전략 ETF 자산배분 앱
+# - VAA 공격형 / LAA / 오리지널 듀얼 모멘텀
+# - 국내상장 ETF 대체 매핑
+# - 화면에서 KRX 키를 입력받지 않음
+# - 전략별 최근/다음 리밸런싱 일정 표시
+# ============================================================
+
 st.set_page_config(page_title="강환국 전략 ETF 자산배분", layout="wide")
 
 KRX_URL = "http://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd"
@@ -33,6 +41,7 @@ ODM_ASSETS = ["SPY", "EFA", "BIL", "AGG"]
 
 
 def get_data_key() -> str:
+    """화면 입력 없이 Streamlit Secrets 또는 환경변수에서 연결값을 읽는다."""
     value = ""
 
     try:
@@ -134,6 +143,9 @@ def fetch_history(data_key: str, codes: list[str], start_dt, end_dt) -> pd.DataF
     codes = set(str(c).strip() for c in codes if str(c).strip())
     days = pd.date_range(start=start_dt, end=end_dt, freq="B")
     rows = []
+
+    if len(days) == 0:
+        return pd.DataFrame()
 
     bar = st.progress(0, text="ETF 가격 데이터를 조회하는 중입니다.")
 
@@ -286,11 +298,43 @@ def odm_table(hist: pd.DataFrame, original_map: dict, eval_dt) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def alloc_rows(strategy: str, strategy_weight: float, inner_alloc: dict, original_map: dict):
+def next_rebalance_date(last_date, cycle: str):
+    """최근 리밸런싱일과 주기에 따라 다음 리밸런싱일 계산."""
+    if cycle == "연 1회":
+        return last_date + relativedelta(years=1)
+
+    if cycle == "월 1회":
+        return last_date + relativedelta(months=1)
+
+    return None
+
+
+def rebalance_status(next_date, base_date):
+    if next_date is None:
+        return "-"
+
+    if pd.Timestamp(base_date).date() >= next_date:
+        return "리밸런싱 필요"
+
+    return "대기"
+
+
+def alloc_rows(
+    strategy: str,
+    strategy_weight: float,
+    inner_alloc: dict,
+    original_map: dict,
+    rebalance_info_by_original: dict,
+    base_date,
+):
     rows = []
 
     for original, inner_weight in inner_alloc.items():
         info = original_map[original]
+        rb = rebalance_info_by_original.get(original, {})
+        cycle = rb.get("cycle", "-")
+        last_date = rb.get("last_date", None)
+        next_date = next_rebalance_date(last_date, cycle) if last_date else None
 
         rows.append(
             {
@@ -301,6 +345,10 @@ def alloc_rows(strategy: str, strategy_weight: float, inner_alloc: dict, origina
                 "자산군": info["asset"],
                 "하위전략 내 비중": inner_weight,
                 "강환국 전략 전체 비중": strategy_weight * inner_weight,
+                "리밸런싱 주기": cycle,
+                "최근 리밸런싱일": last_date,
+                "다음 리밸런싱일": next_date,
+                "리밸런싱 상태": rebalance_status(next_date, base_date),
             }
         )
 
@@ -324,14 +372,32 @@ def pct_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return out
 
 
+def date_cols_to_string(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    out = df.copy()
+
+    for col in cols:
+        if col in out.columns:
+            out[col] = out[col].apply(lambda x: "-" if pd.isna(x) or x is None else str(x))
+
+    return out
+
+
+# ============================================================
+# 화면
+# ============================================================
+
 st.title("강환국 전략 ETF 자산배분")
-st.caption("VAA 공격형 · LAA · 오리지널 듀얼 모멘텀을 국내상장 ETF로 대체해 최종 매수 비중을 계산합니다.")
+st.caption("VAA 공격형 · LAA · 오리지널 듀얼 모멘텀을 국내상장 ETF로 대체해 최종 매수 비중과 리밸런싱 일정을 계산합니다.")
 
 data_key = get_data_key()
 
+today = date.today()
+default_monthly_last = today - relativedelta(months=1)
+default_annual_last = today - relativedelta(years=1)
+
 with st.sidebar:
     st.header("1) 조회 기준")
-    eval_date = st.date_input("평가 기준일", value=date.today())
+    eval_date = st.date_input("평가 기준일", value=today)
     lookback_months = st.slider(
         "데이터 조회기간",
         min_value=13,
@@ -348,7 +414,29 @@ with st.sidebar:
         index=0,
     )
 
-    st.header("3) 하위전략 비중")
+    st.header("3) 최근 리밸런싱일")
+    laa_annual_last = st.date_input(
+        "LAA 고정자산 최근 리밸런싱일",
+        value=default_annual_last,
+        help="IWD, GLD, IEF 대체 ETF의 최근 연간 리밸런싱일",
+    )
+    laa_monthly_last = st.date_input(
+        "LAA 변동자산 최근 리밸런싱일",
+        value=default_monthly_last,
+        help="QQQ 또는 SHY 대체 ETF의 최근 월간 리밸런싱일",
+    )
+    vaa_monthly_last = st.date_input(
+        "VAA 공격형 최근 리밸런싱일",
+        value=default_monthly_last,
+        help="VAA 공격형 전략의 최근 월간 리밸런싱일",
+    )
+    odm_monthly_last = st.date_input(
+        "오리지널 듀얼 모멘텀 최근 리밸런싱일",
+        value=default_monthly_last,
+        help="오리지널 듀얼 모멘텀 전략의 최근 월간 리밸런싱일",
+    )
+
+    st.header("4) 하위전략 비중")
     w_laa = st.number_input(
         "LAA 비중",
         min_value=0.0,
@@ -374,7 +462,7 @@ with st.sidebar:
         format="%.4f",
     )
 
-    st.header("4) VAA 판정 기준")
+    st.header("5) VAA 판정 기준")
     zero_is_defensive = st.checkbox(
         "모멘텀 스코어 0점은 방어 신호로 처리",
         value=True,
@@ -391,6 +479,7 @@ if abs(weight_sum - 1.0) > 1e-8:
     w_laa = w_laa / weight_sum
     w_vaa = w_vaa / weight_sum
     w_odm = w_odm / weight_sum
+
 
 with st.expander("국내상장 ETF 대체 매핑 확인/수정", expanded=False):
     st.write("같은 자산군의 다른 ETF를 쓰고 싶으면 종목코드와 ETF명을 수정하세요.")
@@ -421,6 +510,45 @@ missing = [
 if missing:
     st.error(f"필수 ETF 매핑이 없습니다: {', '.join(missing)}")
     st.stop()
+
+st.subheader("입력된 리밸런싱 일정")
+schedule_preview = pd.DataFrame(
+    [
+        {
+            "구분": "LAA 고정자산",
+            "대상": "IWD, GLD, IEF",
+            "주기": "연 1회",
+            "최근 리밸런싱일": laa_annual_last,
+            "다음 리밸런싱일": next_rebalance_date(laa_annual_last, "연 1회"),
+            "상태": rebalance_status(next_rebalance_date(laa_annual_last, "연 1회"), eval_date),
+        },
+        {
+            "구분": "LAA 변동자산",
+            "대상": "QQQ 또는 SHY",
+            "주기": "월 1회",
+            "최근 리밸런싱일": laa_monthly_last,
+            "다음 리밸런싱일": next_rebalance_date(laa_monthly_last, "월 1회"),
+            "상태": rebalance_status(next_rebalance_date(laa_monthly_last, "월 1회"), eval_date),
+        },
+        {
+            "구분": "VAA 공격형",
+            "대상": "선택 ETF 1개",
+            "주기": "월 1회",
+            "최근 리밸런싱일": vaa_monthly_last,
+            "다음 리밸런싱일": next_rebalance_date(vaa_monthly_last, "월 1회"),
+            "상태": rebalance_status(next_rebalance_date(vaa_monthly_last, "월 1회"), eval_date),
+        },
+        {
+            "구분": "오리지널 듀얼 모멘텀",
+            "대상": "선택 ETF 1개",
+            "주기": "월 1회",
+            "최근 리밸런싱일": odm_monthly_last,
+            "다음 리밸런싱일": next_rebalance_date(odm_monthly_last, "월 1회"),
+            "상태": rebalance_status(next_rebalance_date(odm_monthly_last, "월 1회"), eval_date),
+        },
+    ]
+)
+st.dataframe(schedule_preview, use_container_width=True)
 
 run = st.button("전략 비중 계산", type="primary")
 
@@ -464,6 +592,13 @@ if run:
 
     laa_variable = "SHY" if laa_defensive else "QQQ"
 
+    laa_rebalance_info = {
+        "IWD": {"cycle": "연 1회", "last_date": laa_annual_last},
+        "GLD": {"cycle": "연 1회", "last_date": laa_annual_last},
+        "IEF": {"cycle": "연 1회", "last_date": laa_annual_last},
+        laa_variable: {"cycle": "월 1회", "last_date": laa_monthly_last},
+    }
+
     rows += alloc_rows(
         "LAA",
         w_laa,
@@ -474,6 +609,8 @@ if run:
             laa_variable: 0.25,
         },
         original_map,
+        laa_rebalance_info,
+        eval_date,
     )
 
     vt = vaa_table(hist, original_map, actual_eval_dt)
@@ -513,6 +650,8 @@ if run:
         w_vaa,
         {vaa_selected: 1.0},
         original_map,
+        {vaa_selected: {"cycle": "월 1회", "last_date": vaa_monthly_last}},
+        eval_date,
     )
 
     ot = odm_table(hist, original_map, actual_eval_dt)
@@ -545,6 +684,8 @@ if run:
         w_odm,
         {odm_selected: 1.0},
         original_map,
+        {odm_selected: {"cycle": "월 1회", "last_date": odm_monthly_last}},
+        eval_date,
     )
 
     st.subheader("하위전략별 선택 결과")
@@ -555,19 +696,19 @@ if run:
         "LAA 변동 25%",
         f"{laa_variable} → {original_map[laa_variable]['name']}",
     )
-    c1.caption("고정 75%는 IWD, GLD, IEF 대체 ETF로 유지")
+    c1.caption(f"다음 월간 리밸런싱일: {next_rebalance_date(laa_monthly_last, '월 1회')}")
 
     c2.metric(
         "VAA 공격형",
         f"{vaa_selected} → {original_map[vaa_selected]['name']}",
     )
-    c2.caption(vaa_reason)
+    c2.caption(f"{vaa_reason} / 다음 리밸런싱일: {next_rebalance_date(vaa_monthly_last, '월 1회')}")
 
     c3.metric(
         "오리지널 듀얼 모멘텀",
         f"{odm_selected} → {original_map[odm_selected]['name']}",
     )
-    c3.caption(odm_reason)
+    c3.caption(f"{odm_reason} / 다음 리밸런싱일: {next_rebalance_date(odm_monthly_last, '월 1회')}")
 
     st.subheader("VAA 모멘텀 스코어")
     st.dataframe(
@@ -592,30 +733,34 @@ if run:
 
     detail = pd.DataFrame(rows)
 
-    st.subheader("하위전략별 투입 비중")
-    st.dataframe(
-        pct_cols(
-            detail,
-            [
-                "하위전략 내 비중",
-                "강환국 전략 전체 비중",
-            ],
-        ),
-        use_container_width=True,
+    st.subheader("하위전략별 투입 비중 및 리밸런싱 일정")
+    detail_display = pct_cols(
+        detail,
+        [
+            "하위전략 내 비중",
+            "강환국 전략 전체 비중",
+        ],
     )
+    detail_display = date_cols_to_string(detail_display, ["최근 리밸런싱일", "다음 리밸런싱일"])
+    st.dataframe(detail_display, use_container_width=True)
 
     final = (
         detail
-        .groupby(["국내 ETF 코드", "국내 ETF명", "자산군"], as_index=False)["강환국 전략 전체 비중"]
-        .sum()
+        .groupby(["국내 ETF 코드", "국내 ETF명", "자산군"], as_index=False)
+        .agg(
+            {
+                "강환국 전략 전체 비중": "sum",
+                "다음 리밸런싱일": lambda x: min(v for v in x if v is not None),
+                "리밸런싱 상태": lambda x: "리밸런싱 필요" if "리밸런싱 필요" in list(x) else "대기",
+            }
+        )
         .sort_values("강환국 전략 전체 비중", ascending=False)
     )
 
     st.subheader("최종 매수 비중")
-    st.dataframe(
-        pct_cols(final, ["강환국 전략 전체 비중"]),
-        use_container_width=True,
-    )
+    final_display = pct_cols(final, ["강환국 전략 전체 비중"])
+    final_display = date_cols_to_string(final_display, ["다음 리밸런싱일"])
+    st.dataframe(final_display, use_container_width=True)
 
     st.bar_chart(
         final.set_index("국내 ETF명")["강환국 전략 전체 비중"]
@@ -631,7 +776,7 @@ if run:
     )
 
 else:
-    st.info("조회 기준과 LAA 조건을 선택한 뒤 '전략 비중 계산'을 누르세요.")
+    st.info("조회 기준, LAA 조건, 최근 리밸런싱일을 선택한 뒤 '전략 비중 계산'을 누르세요.")
 
     st.subheader("기본 국내 ETF 매핑")
     st.dataframe(
