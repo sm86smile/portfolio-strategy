@@ -17,7 +17,7 @@ from dateutil.relativedelta import relativedelta
 # - Appendix: 매수 전략 및 리밸런싱 계산 방식 표 제공
 # ============================================================
 
-st.set_page_config(page_title="강환국 전략 ETF 자산배분", layout="wide")
+st.set_page_config(page_title="ETF 자산배분", layout="wide")
 
 KRX_URL = "http://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd"
 
