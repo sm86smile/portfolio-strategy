@@ -17,7 +17,7 @@ from dateutil.relativedelta import relativedelta
 # - Appendix: 매수 전략 및 리밸런싱 계산 방식 표 제공
 # ============================================================
 
-st.set_page_config(page_title="강환국 전략 ETF 자산배분", layout="wide")
+st.set_page_config(page_title="ETF 자산배분", layout="wide")
 
 KRX_URL = "http://data-dbg.krx.co.kr/svc/apis/etp/etf_bydd_trd"
 
@@ -491,7 +491,7 @@ def appendix_rebalance_table() -> pd.DataFrame:
 # 화면
 # ============================================================
 
-st.title("강환국 전략 ETF 자산배분")
+st.title("ETF 자산배분")
 st.caption("VAA 공격형 · LAA · 오리지널 듀얼 모멘텀을 국내상장 ETF로 대체해 최종 매수 비중, 목표 투자금, 리밸런싱 일정을 계산합니다.")
 
 data_key = get_data_key()
